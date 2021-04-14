@@ -1,0 +1,5 @@
+[0m[[0m[0mdebug[0m] [0m[0mCopy resource mappings: [0m
+[0m[[0m[0mdebug[0m] [0m[0m	(/home/opangkteyo/projects/arynos/play-samples-play-scala-hello-world-tutorial/conf/application.conf,/home/opangkteyo/projects/arynos/play-samples-play-scala-hello-world-tutorial/target/scala-2.13/classes/application.conf)[0m
+[0m[[0m[0mdebug[0m] [0m[0m	(/home/opangkteyo/projects/arynos/play-samples-play-scala-hello-world-tutorial/conf/routes,/home/opangkteyo/projects/arynos/play-samples-play-scala-hello-world-tutorial/target/scala-2.13/classes/routes)[0m
+[0m[[0m[0mdebug[0m] [0m[0m	(/home/opangkteyo/projects/arynos/play-samples-play-scala-hello-world-tutorial/conf/messages,/home/opangkteyo/projects/arynos/play-samples-play-scala-hello-world-tutorial/target/scala-2.13/classes/messages)[0m
+[0m[[0m[0mdebug[0m] [0m[0m	(/home/opangkteyo/projects/arynos/play-samples-play-scala-hello-world-tutorial/conf/logback.xml,/home/opangkteyo/projects/arynos/play-samples-play-scala-hello-world-tutorial/target/scala-2.13/classes/logback.xml)[0m
