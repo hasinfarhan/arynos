@@ -5,6 +5,8 @@ name = "pypi"
 
 [packages]
 python-binance = "*"
+python-dotenv = "*"
+apscheduler = "*"
 
 [dev-packages]
 
