@@ -51,6 +51,29 @@ class Bot:
         
     def round_up_amount(self, symbol: str, amount: float) -> float:
         self.binance.get_symbol_info(symbol=symbol).get('filters')
+
+    def all_symbols(self):
+        symbols = self.binance.get_exchange_info().get('symbols')
+        symbol_names = [x['symbol'] for x in symbols]
+        symbol_names = [x for x in symbol_names if len(x) >= 4 and x[-4:] == 'USDT']
+        return symbol_names
+
+    def get_symbol_price(self, symbol:str):
+        return self.binance.get_symbol_ticker(symbol=symbol).get('price')
+
+    def symbol_info(self, symbol:str):
+        return self.binance.get_symbol_info(symbol=symbol)
+
+    def get_symbol_filters(self, symbol:str):
+        symbol_info = self.symbol_info(symbol)
+        return symbol_info.get('filters')
+
+    def get_historical_klines(self, symbol:str):
+        start='15 July 2024'
+        end=None
+        interval = Client.KLINE_INTERVAL_5MINUTE
+        klines = self.binance.get_historical_klines(symbol=symbol, interval=interval, start_str=start, end_str=end)
+        return klines
     
     def close_positions(self):
         try:
@@ -82,8 +105,6 @@ class Bot:
                         quantity=self.round_up_amount(debt_qty))
                     self.complete_order(symbol=symbol, order_id=repay_order.get("orderId"))
                 self.binance.transf
-
-
             
             self.state.open_symbol = None
         
@@ -206,6 +227,11 @@ def main():
     )
     bot = Bot(config, binance)
     
-    binance.transfer_dust(asset='BCH', accountType='MARGIN')
+    #binance.transfer_dust(asset='BCH', accountType='MARGIN')
+    print(bot.all_symbols())
+
+    # s = 'RNDRBRL'
+    # print(s[-4:])
+
 
 main()
