@@ -6,6 +6,8 @@ import traceback
 from typing import Dict, Optional
 from dataclasses import dataclass
 from dotenv import load_dotenv
+import random
+import logging
 
 # https://python-binance.readthedocs.io/en/latest
 from binance.client import Client
@@ -21,12 +23,13 @@ class Config:
         load_dotenv()
         self.BINANCE_API_KEY = os.getenv("API_KEY")
         self.BINANCE_API_SECRET_KEY = os.getenv("API_SECRET_KEY")
-        self.TRADING_FREQUENCY_MINUTES = 5
+        self.TRADING_FREQUENCY_MINUTES = 10
+        self.MAX_TRADE_COUNT = 3
         self.MAX_RETRIES = 3
         self.POLL_INTERVAL_SECONDS = 5
         self.LIMIT_ORDER_SPREAD = 0.002
         self.BASE_CURRENCY = 'USDT'
-        self.TRADE_MAX_DURATION_MINUTES = 30
+        self.TRADE_BUDGET_USDT = 50
 
 @dataclass
 class Trade:
@@ -37,11 +40,11 @@ class Trade:
     profit_price: float
     loss_price: float
     price_precision: int
-    max_duration_mins: int = Config().TRADE_MAX_DURATION_MINUTES
     
 @dataclass
 class State:
     open_symbol: str = None
+    trade_count: int = 0
     
 
 class Bot:
@@ -49,9 +52,61 @@ class Bot:
         self.config = config
         self.binance = binance
         self.state = State()
+        self.scheduler = BlockingScheduler()
+
+    '''
+    Trading Algo V1:
+
+    - Picked a ticker randomly
+    - Sets exit levels
+    - Makes short/SELL order
+    '''
+    def __get_best_trade_v1(self) -> Trade | None:
+        all_symbols = self.all_symbols()
+        symbol = random.choice(all_symbols)
+        filters = self.get_symbol_filters(symbol)
+        
+        side = SIDE_SELL
+        price = float(self.get_symbol_price(symbol))
+        price = self.adjust_price(price=price, filters=filters)
+        profit_price = self.adjust_price(price = price * 0.99, filters=filters, round_up=True)
+        loss_price = self.adjust_price(price = price * 1.02, filters=filters, round_up=True)
+        quantity = self.config.TRADE_BUDGET_USDT / price
+        quantity = self.adjust_quantity(quantity=quantity, filters=filters)
+        price_precision = self.get_price_precision(filters)
+
+        if quantity * price > self.config.TRADE_BUDGET_USDT:
+            raise Exception("Budget overflows!")
+
+        return Trade(
+            symbol = symbol,
+            side = side,
+            quantity = quantity,
+            in_price = price,
+            profit_price = profit_price,
+            loss_price =  loss_price,
+            price_precision = price_precision
+        )
+    
+    def get_historical_7d_klines(self, symbol:str):
+        today = DT.date.today()
+        week_ago = today - DT.timedelta(days=7)
+        week_ago = week_ago.strftime('%m/%d/%Y')
+        interval = Client.KLINE_INTERVAL_5MINUTE
+        klines = self.binance.get_historical_klines(symbol=symbol, interval=interval, start_str=week_ago, end_str=None)
+        return klines
+
+    def get_price_precision(self, filters):
+        for f in filters:
+            if f['filterType'] == 'PRICE_FILTER':
+                tick_size = float(f['tickSize'])
+                precision = math.log10(tick_size)
+                if precision < 0:
+                    return -precision
+        return 0
 
     # Adjust price to fit within the filters
-    def adjust_price(price, filters):
+    def adjust_price(self, price:float, filters, round_up:bool=False):
         for f in filters:
             if f['filterType'] == 'PRICE_FILTER':
                 min_price = float(f['minPrice'])
@@ -61,12 +116,14 @@ class Bot:
                 # Adjust price to be within min and max price
                 price = max(min_price, min(price, max_price))
 
-                # Round down to the nearest tick size
+                # Round up/down to the nearest tick size
                 price = price - (price % tick_size)
+                if round_up:
+                    price += tick_size
         return price
 
     # Adjust quantity to fit within the filters
-    def adjust_quantity(quantity, filters, round_up:bool=False):
+    def adjust_quantity(self, quantity, filters, round_up:bool=False):
         for f in filters:
             if f['filterType'] == 'LOT_SIZE':
                 min_qty = float(f['minQty'])
@@ -83,7 +140,8 @@ class Bot:
         return quantity
 
     def all_symbols(self):
-        symbols = self.binance.get_exchange_info().get('symbols')
+        symbols = self.binance.get_margin_all_pairs()
+        symbols = [x for x in symbols if x['isMarginTrade'] and x['isSellAllowed'] and x['isBuyAllowed']]
         symbol_names = [x['symbol'] for x in symbols]
         symbol_names = [x for x in symbol_names if len(x) >= 4 and x[-4:] == 'USDT']
         return symbol_names
@@ -91,8 +149,8 @@ class Bot:
     def get_symbol_price(self, symbol:str):
         return self.binance.get_symbol_ticker(symbol=symbol).get('price')
     
-    def get_price_str(self, price, precision):
-        return "{:0.0{}f}".format(price, precision)
+    def get_price_str(self, price:float, precision:int):
+        return "{:0.0{}f}".format(price, int(precision))
 
     def symbol_info(self, symbol:str):
         return self.binance.get_symbol_info(symbol=symbol)
@@ -101,42 +159,50 @@ class Bot:
         symbol_info = self.symbol_info(symbol)
         return symbol_info.get('filters')
 
-    def get_historical_7d_klines(self, symbol:str):
-        today = DT.date.today()
-        week_ago = today - DT.timedelta(days=7)
-        week_ago = week_ago.strftime('%m/%d/%Y')
-        interval = Client.KLINE_INTERVAL_5MINUTE
-        klines = self.binance.get_historical_klines(symbol=symbol, interval=interval, start_str=week_ago, end_str=None)
-        return klines
-
     def repay_debt(self, symbol:str, qty: float):
         if qty > 0:
             filters = self.get_symbol_filters(symbol=symbol)
-            adjusted_qty = self.adjust_quantity(qty, filters=filters, round_up=True)
-            repay_order = self.binance.create_margin_order(
-                symbol=symbol,
-                side=SIDE_BUY,
-                type=ORDER_TYPE_MARKET,
-                timeInForce=TIME_IN_FORCE_GTC,
-                sideEffectType=AUTO_REPAY_TYPE,
-                quantity=adjusted_qty)
-            self.complete_order(symbol=symbol, order_id=repay_order.get("orderId"))
+            adjusted_qty = self.adjust_quantity(quantity=qty, filters=filters, round_up=True)
+            try:
+                repay_order = self.binance.create_margin_order(
+                    symbol=symbol,
+                    side=SIDE_BUY,
+                    type=ORDER_TYPE_MARKET,
+                    sideEffectType=AUTO_REPAY_TYPE,
+                    quantity=adjusted_qty)
+                self.complete_order(symbol=symbol, order_id=repay_order.get("orderId"))
+            except Exception as e:
+                if 'NOTIONAL' in str(e):
+                    logging.warning("Repay failed for {symbol} failed with error {error}".format(symbol=symbol, error=e))
+                else:
+                    raise e
 
     def sell_position(self, symbol:str, qty: float):
         if qty > 0:
             filters = self.get_symbol_filters(symbol=symbol)
-            adjusted_qty = self.adjust_quantity(qty, filters=filters)
-            close_order = self.binance.create_margin_order(
-                symbol=symbol,
-                side=SIDE_SELL,
-                type=ORDER_TYPE_MARKET,
-                timeInForce=TIME_IN_FORCE_GTC,
-                sideEffectType=NO_SIDE_EFFECT_TYPE,
-                quantity=adjusted_qty)
-            self.complete_order(symbol=symbol, order_id=close_order.get("orderId"))
+            adjusted_qty = self.adjust_quantity(quantity=qty, filters=filters)
+            try:
+                close_order = self.binance.create_margin_order(
+                    symbol=symbol,
+                    side=SIDE_SELL,
+                    type=ORDER_TYPE_MARKET,
+                    quantity=adjusted_qty)
+                self.complete_order(symbol=symbol, order_id=close_order.get("orderId"))
+            except Exception as e:
+                if 'NOTIONAL' in str(e):
+                    logging.warning("Sell position for {symbol} failed with error {error}".format(symbol=symbol, error=e))
+                else:
+                    raise e
+
+    # not used yet
+    def try_dust_sell(self, ticker:str):
+        try:
+            self.binance.transfer_dust(asset=ticker, accountType='MARGIN')
+        except Exception as e:
+                logging.warning("Dust sell for {ticker} failed with error {error}".format(ticker=ticker, error=e))
     
     def close_positions(self):
-        #try:
+        try:
             for attempt in range(self.config.MAX_RETRIES):
                 if attempt > 0:
                     time.sleep(self.config.POLL_INTERVAL_SECONDS)
@@ -146,15 +212,16 @@ class Bot:
                         symbol=self.state.open_symbol,
                         orderId=order.get('orderId'))
 
-
             for attempt in range(self.config.MAX_RETRIES):
                 if attempt > 0:
                     time.sleep(self.config.POLL_INTERVAL_SECONDS)
                 assets = self.binance.get_margin_account().get('userAssets')
                 for asset in assets:
-                    if asset == self.config.BASE_CURRENCY:
-                        continue
                     ticker = asset.get('asset')
+
+                    if ticker == self.config.BASE_CURRENCY:
+                        continue
+
                     symbol = ticker + self.config.BASE_CURRENCY
                     debt_qty = float(asset.get('borrowed')) + float(asset.get('interest'))
                     free_qty = float(asset.get('free'))
@@ -162,19 +229,12 @@ class Bot:
                     self.sell_position(symbol=symbol, qty=free_qty)
             
             self.state.open_symbol = None
-        #except Exception as e:
-        #    print(e)
-        #    print("Positions closing failed, need manual action.")
-
-    
-    def can_trade(self) -> bool:
-        return True
+        except Exception as e:
+            logging.error("Positions closing failed, need manual action. Error: {error}".format(error=e))
+            raise e
     
     def get_best_trade(self) -> Trade | None:
-        current_price = float(self.binance.get_symbol_ticker(symbol='ACHUSDT').get('price'))
-        symbol_info = self.binance.get_symbol_info(symbol='ACHUSDT')
-        print(symbol_info)
-        return Trade()
+        return self.__get_best_trade_v1()
 
     def complete_order(self, symbol, order_id):
         for attempt in range(self.config.MAX_RETRIES):
@@ -246,13 +306,24 @@ class Bot:
                 price=self.get_price_str(trade.loss_price, trade.price_precision),
                 stopPrice=self.get_price_str(stop_loss_price, trade.price_precision))
         
+            logging.info("Short order placed: {trade}.".format(trade=trade))
+        
         except Exception as e:
-            print(e)
+            logging.error(e)
             self.close_positions()
 
     def trade(self, trade: Trade):
         self.state.open_symbol = trade.symbol
+        self.state.trade_count += 1
+
+        if self.state.trade_count > self.config.MAX_TRADE_COUNT:
+            logging.info("Trading cycle finished, closing the bot.")
+            self.close_positions()
+            self.scheduler.shutdown(wait=False)
         
+        logging.info(trade)
+        print(trade)
+
         if trade.side == SIDE_BUY:
             self.order_long(trade)
         elif trade.side == SIDE_SELL:
@@ -261,15 +332,18 @@ class Bot:
             raise Exception("Trade side should be BUY/SELL, but given " + trade.side)
 
     def step(self):
-        if self.can_trade():
-            best_trade = self.get_best_trade()
-            if best_trade is not None:
-                self.trade(trade=best_trade)
+        self.close_positions()
+        best_trade = self.get_best_trade()
+        if best_trade is not None:
+            self.trade(trade=best_trade)
 
     def run(self):
-        scheduler = BlockingScheduler()
-        scheduler.add_job(self.step, 'interval', minutes=self.config.TRADING_FREQUENCY_MINUTES)
-        scheduler.start()
+        try:
+            self.scheduler.add_job(self.step, 'interval', minutes=self.config.TRADING_FREQUENCY_MINUTES)
+            self.scheduler.start()
+        except Exception as e:
+            self.close_positions()
+            self.scheduler.shutdown()
 
 def main():
     config = Config()
@@ -278,8 +352,6 @@ def main():
         config.BINANCE_API_SECRET_KEY,
     )
     bot = Bot(config, binance)
-    
-    #binance.transfer_dust(asset='BCH', accountType='MARGIN')
-    bot.close_positions()
+    bot.run()
 
 main()
