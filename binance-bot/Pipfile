@@ -7,6 +7,8 @@ name = "pypi"
 python-binance = "*"
 python-dotenv = "*"
 apscheduler = "*"
+pandas = "*"
+numpy = "*"
 
 [dev-packages]
 

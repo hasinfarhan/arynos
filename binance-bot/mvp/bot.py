@@ -9,6 +9,9 @@ from dotenv import load_dotenv
 import random
 import logging
 
+import pandas as pd
+import numpy as np
+
 # https://python-binance.readthedocs.io/en/latest
 from binance.client import Client
 from binance.enums import *
@@ -23,13 +26,13 @@ class Config:
         load_dotenv()
         self.BINANCE_API_KEY = os.getenv("API_KEY")
         self.BINANCE_API_SECRET_KEY = os.getenv("API_SECRET_KEY")
-        self.TRADING_FREQUENCY_MINUTES = 10
+        self.TRADING_FREQUENCY_MINUTES = 15
         self.MAX_TRADE_COUNT = 3
-        self.MAX_RETRIES = 3
+        self.MAX_RETRIES = 2
         self.POLL_INTERVAL_SECONDS = 5
         self.LIMIT_ORDER_SPREAD = 0.002
         self.BASE_CURRENCY = 'USDT'
-        self.TRADE_BUDGET_USDT = 50
+        self.TRADE_BUDGET_USDT = 300
 
 @dataclass
 class Trade:
@@ -57,20 +60,21 @@ class Bot:
     '''
     Trading Algo V1:
 
-    - Picked a ticker randomly
+    - Pickes a ticker randomly from high RSI pairs
     - Sets exit levels
     - Makes short/SELL order
     '''
     def __get_best_trade_v1(self) -> Trade | None:
         all_symbols = self.all_symbols()
-        symbol = random.choice(all_symbols)
+        drop_assests = self.get_potential_drop_assets(all_symbols)
+        symbol = random.choice(drop_assests)
         filters = self.get_symbol_filters(symbol)
         
         side = SIDE_SELL
         price = float(self.get_symbol_price(symbol))
         price = self.adjust_price(price=price, filters=filters)
-        profit_price = self.adjust_price(price = price * 0.99, filters=filters, round_up=True)
-        loss_price = self.adjust_price(price = price * 1.02, filters=filters, round_up=True)
+        profit_price = self.adjust_price(price = price * 0.975, filters=filters, round_up=True)
+        loss_price = self.adjust_price(price = price * 1.025, filters=filters, round_up=True)
         quantity = self.config.TRADE_BUDGET_USDT / price
         quantity = self.adjust_quantity(quantity=quantity, filters=filters)
         price_precision = self.get_price_precision(filters)
@@ -88,13 +92,38 @@ class Bot:
             price_precision = price_precision
         )
     
-    def get_historical_7d_klines(self, symbol:str):
-        today = DT.date.today()
-        week_ago = today - DT.timedelta(days=7)
-        week_ago = week_ago.strftime('%m/%d/%Y')
-        interval = Client.KLINE_INTERVAL_5MINUTE
-        klines = self.binance.get_historical_klines(symbol=symbol, interval=interval, start_str=week_ago, end_str=None)
-        return klines
+    def get_historical_klines(self, symbol, interval):
+        """Get historical klines from Binance."""
+        # look back last 2h data
+        timestamp = pd.Timestamp.now() - pd.Timedelta('2 hours')
+        klines = self.binance.get_historical_klines(symbol=symbol, interval=interval, start_str=str(timestamp))
+        data = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 
+                                            'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 
+                                            'taker_buy_quote_asset_volume', 'ignore'])
+        data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
+        data.set_index('timestamp', inplace=True)
+        data = data.astype(float)
+        return data
+
+    def calculate_rsi(self, data, window):
+        """Calculate the Relative Strength Index (RSI)."""
+        delta = data['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+
+    def get_potential_drop_assets(self, symbols):
+        """Identify assets with high potential to drop in price."""
+        potential_drops = []
+        for symbol in symbols:
+            # calculates RSI based on last 15x1m = 15m of price changes
+            data = self.get_historical_klines(symbol, interval=Client.KLINE_INTERVAL_1MINUTE)
+            rsi = self.calculate_rsi(data, window = 15)
+            if rsi.iloc[-1] > 70:  # RSI > 70 indicates overbought condition
+                potential_drops.append(symbol)
+        return potential_drops
 
     def get_price_precision(self, filters):
         for f in filters:
@@ -206,11 +235,14 @@ class Bot:
             for attempt in range(self.config.MAX_RETRIES):
                 if attempt > 0:
                     time.sleep(self.config.POLL_INTERVAL_SECONDS)
-                open_orders = self.binance.get_open_margin_orders(symbol=self.state.open_symbol)
-                for order in open_orders:
-                    self.binance.cancel_margin_order(
-                        symbol=self.state.open_symbol,
-                        orderId=order.get('orderId'))
+
+                open_symbol = self.state.open_symbol    
+                if open_symbol is not None:
+                    open_orders = self.binance.get_open_margin_orders(symbol=open_symbol)
+                    for order in open_orders:
+                        self.binance.cancel_margin_order(
+                            symbol=self.state.open_symbol,
+                            orderId=order.get('orderId'))
 
             for attempt in range(self.config.MAX_RETRIES):
                 if attempt > 0:
