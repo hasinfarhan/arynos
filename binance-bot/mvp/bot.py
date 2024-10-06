@@ -384,6 +384,7 @@ def main():
         config.BINANCE_API_SECRET_KEY,
     )
     bot = Bot(config, binance)
-    bot.run()
+    #bot.run()
+    print("hello")
 
 main()
